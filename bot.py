@@ -1,37 +1,28 @@
 import os
-import time
 import requests
 import discord
 from discord.ext import commands
 
-# ===== ENV =====
+# ================== ENV ==================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # optional
 
 if not DISCORD_TOKEN or not DISCOGS_TOKEN:
     raise RuntimeError("DISCORD_TOKEN / DISCOGS_TOKEN 환경변수 없음")
 
-# ===== Discord =====
+# ================== DISCORD ==================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Anti-duplicate guard (여러 인스턴스면 의미 없음, 한 인스턴스에서만 방지) =====
-processed_ids = set()
-def already_processed(message_id: int) -> bool:
-    if message_id in processed_ids:
-        return True
-    processed_ids.add(message_id)
-    if len(processed_ids) > 5000:
-        processed_ids.clear()
-    return False
-
-# ===== Discogs =====
+# ================== DISCOGS ==================
 DISCOGS_BASE = "https://api.discogs.com"
-DISCOGS_HEADERS = {"User-Agent": "lp-bot/final-youtube-fix"}
+DISCOGS_HEADERS = {
+    "User-Agent": "lp-bot/final",
+}
 
-def discogs_search(query: str, limit: int = 10):
+def discogs_search_vinyl(query: str, limit: int = 10):
     url = f"{DISCOGS_BASE}/database/search"
     params = {
         "q": query,
@@ -51,7 +42,7 @@ def discogs_release(release_id: int):
     r.raise_for_status()
     return r.json()
 
-def discogs_all_tracks(release_json: dict):
+def discogs_tracks(release_json: dict):
     tracks = []
     for t in release_json.get("tracklist", []):
         if t.get("type_") == "track":
@@ -60,81 +51,88 @@ def discogs_all_tracks(release_json: dict):
                 tracks.append(title)
     return tracks
 
-# ===== YouTube =====
+def pick_cover(release_json: dict) -> str | None:
+    imgs = release_json.get("images") or []
+    if imgs and imgs[0].get("uri"):
+        return imgs[0]["uri"]
+    thumb = release_json.get("thumb")
+    return thumb if thumb else None
+
+# ================== YOUTUBE ==================
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 yt_cache: dict[str, str | None] = {}
 
 def youtube_enabled() -> bool:
     return bool(YOUTUBE_API_KEY)
 
-def _youtube_search_once(query: str) -> str | None:
-    """Return first video link or None."""
-    params = {
-        "part": "snippet",
-        "q": query,
-        "key": YOUTUBE_API_KEY,
-        "maxResults": 1,
-        "type": "video",
-        "videoCategoryId": "10",   # 음악 카테고리로 제한 (성공률 크게 올라감)
-        "safeSearch": "none",
-    }
-    r = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=20)
-    r.raise_for_status()
-    items = (r.json().get("items") or [])
-    if not items:
-        return None
-    vid = items[0]["id"]["videoId"]
-    return f"https://youtu.be/{vid}"
-
-def youtube_link(artist: str, track: str) -> str | None:
-    """
-    실패율 줄이기 최종 버전:
-    - 일반 제목(Everything, Diamond 같은) 때문에 생기는 매칭 실패를 줄이려고
-      query를 2~3번 바꿔가며 재시도.
-    """
+def youtube_link(artist: str, track: str, album: str) -> str | None:
+    """검색 정확도 강화 버전. 없으면 None."""
     if not youtube_enabled():
         return None
 
-    # 캐시 키는 artist+track (재시도까지 포함된 결과 저장)
-    cache_key = f"{artist}|||{track}"
-    if cache_key in yt_cache:
-        return yt_cache[cache_key]
+    key = f"{artist}|{track}|{album}"
+    if key in yt_cache:
+        return yt_cache[key]
 
-    # 검색어 우선순위:
-    # 1) Official Audio
-    # 2) Topic (자동 생성 음원)
-    # 3) 그냥 audio
-    # + 아티스트를 따옴표로 묶어서 정확도 약간 올림
+    # 흔한 곡명(Everything, Cherry, August 등) 대응:
+    # - 앨범명 포함
+    # - Official Audio / Topic / audio 순으로 재시도
     queries = [
-        f'{track} "{artist}" Official Audio',
-        f'{track} "{artist}" topic',
-        f'{track} "{artist}" audio',
+        f'"{track}" "{artist}" "{album}" official audio',
+        f'"{track}" "{artist}" topic',
+        f'{artist} {track} "{album}" official audio',
+        f'{artist} {track} audio',
     ]
 
     for q in queries:
         try:
-            link = _youtube_search_once(q)
-            if link:
-                yt_cache[cache_key] = link
+            params = {
+                "part": "snippet",
+                "q": q,
+                "key": YOUTUBE_API_KEY,
+                "maxResults": 1,
+                "type": "video",
+                "videoCategoryId": "10",  # Music
+                "safeSearch": "none",
+            }
+            r = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=20)
+            r.raise_for_status()
+            items = r.json().get("items") or []
+            if items:
+                vid = items[0]["id"]["videoId"]
+                link = f"https://youtu.be/{vid}"
+                yt_cache[key] = link
                 return link
         except Exception:
             continue
 
-    yt_cache[cache_key] = None
+    yt_cache[key] = None
     return None
 
-# ===== Formatting =====
-def chunk_lines(lines: list[str], limit: int = 1000) -> list[str]:
+# ================== EMBED HELPERS ==================
+def make_track_lines(artist: str, album: str, tracks: list[str]) -> list[str]:
+    lines = []
+    for i, t in enumerate(tracks, 1):
+        num = f"{i:02}"
+        yt = youtube_link(artist, t, album)
+        if yt:
+            lines.append(f"`{num}` {t} · [YouTube]({yt})")
+        else:
+            lines.append(f"`{num}` {t}")
+    return lines
+
+def chunk_to_fields(lines: list[str], max_chars: int = 1000) -> list[str]:
+    """discord embed field value limit(1024) 근처로 분할"""
     chunks = []
     cur = ""
     for line in lines:
-        add = line if not cur else "\n" + line
-        if len(cur) + len(add) > limit:
+        add = (line if not cur else "\n" + line)
+        if len(cur) + len(add) > max_chars:
             if cur:
                 chunks.append(cur)
                 cur = line
             else:
-                chunks.append(line[:limit])
+                chunks.append(line[:max_chars])
                 cur = ""
         else:
             cur += add
@@ -142,67 +140,86 @@ def chunk_lines(lines: list[str], limit: int = 1000) -> list[str]:
         chunks.append(cur)
     return chunks
 
-def build_embeds(album_title: str, artists: str, year, country, cover_url: str | None, track_chunks: list[str]):
+def build_result_embeds(title: str, artist: str, year, country, cover_url: str | None, track_lines: list[str]) -> list[discord.Embed]:
     footer = "LP Bot • " + ("YouTube 있음" if youtube_enabled() else "YouTube 키 없음")
 
     base = discord.Embed(
-        title=album_title,
-        description=f" {artists}",
-        color=0x2b2d31
+        title=title,
+        description=f"{artist}",
+        color=0x2b2d31,
     )
 
-    info = []
+    info_bits = []
     if year:
-        info.append(f" {year}")
+        info_bits.append(str(year))
     if country:
-        info.append(f" {country}")
-    if info:
-        base.add_field(name=" 앨범 정보", value=" / ".join(info), inline=False)
+        info_bits.append(str(country))
+    if info_bits:
+        base.add_field(name="앨범 정보", value=" / ".join(info_bits), inline=False)
 
     if cover_url:
         base.set_image(url=cover_url)
 
     base.set_footer(text=footer)
 
-    embeds = []
-    cur = base
-    field_count = len(cur.fields)
+    chunks = chunk_to_fields(track_lines, max_chars=1000)
 
-    for i, chunk in enumerate(track_chunks):
-        name = " 수록곡" if i == 0 else " 수록곡 (계속)"
-        if field_count >= 24:
+    embeds: list[discord.Embed] = []
+    cur = base
+    fields_used = len(cur.fields)
+
+    for idx, chunk in enumerate(chunks):
+        field_name = "수록곡" if idx == 0 else "수록곡 (계속)"
+        # embed field는 최대 25개라 안전하게 분리
+        if fields_used >= 24:
             embeds.append(cur)
-            cur = discord.Embed(title=album_title, description=f"🎧 {artists}", color=0x2b2d31)
+            cur = discord.Embed(title=title, description=f"{artist}", color=0x2b2d31)
             cur.set_footer(text=footer)
-            field_count = 0
-        cur.add_field(name=name, value=chunk, inline=False)
-        field_count += 1
+            fields_used = 0
+
+        cur.add_field(name=field_name, value=chunk, inline=False)
+        fields_used += 1
 
     embeds.append(cur)
     return embeds
 
-# ===== UI =====
-class ReleaseSelect(discord.ui.Select):
-    def __init__(self, results, author_id: int, origin_message: discord.Message):
+# ================== UI ==================
+class LPSelect(discord.ui.Select):
+    def __init__(self, results: list[dict], author_id: int, origin_message: discord.Message):
         self.author_id = author_id
         self.origin_message = origin_message
 
         options = []
-        for item in results:
+        for item in results[:10]:
             rid = item.get("id")
+            if not rid:
+                continue
             title = (item.get("title") or "Unknown").strip()
             year = item.get("year")
-            label = f"{title} ({year})" if year else title
-            options.append(discord.SelectOption(label=label[:100], value=str(rid)))
+            country = item.get("country")
+            desc_parts = []
+            if year:
+                desc_parts.append(str(year))
+            if country:
+                desc_parts.append(str(country))
+            desc = " / ".join(desc_parts) if desc_parts else "release"
+
+            options.append(
+                discord.SelectOption(
+                    label=title[:100],
+                    description=desc[:100],
+                    value=str(rid),
+                )
+            )
 
         super().__init__(placeholder="원하는 LP 선택", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        # 본인만 선택 가능
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("니가 검색한 거 아님", ephemeral=True)
             return
 
-        # 타임아웃 방지 (유튜브 여러번 검색해서 느릴 수 있음)
         await interaction.response.defer(ephemeral=True)
 
         rid = int(self.values[0])
@@ -212,43 +229,26 @@ class ReleaseSelect(discord.ui.Select):
             await interaction.followup.send(f"Discogs 조회 실패: {e}", ephemeral=True)
             return
 
-        album_title = rel.get("title") or "Unknown"
-        artists = ", ".join([a.get("name", "").strip() for a in rel.get("artists", []) if a.get("name")]) or "Unknown"
+        title = rel.get("title") or "Unknown"
+        artists = ", ".join([a.get("name", "").strip() for a in (rel.get("artists") or []) if a.get("name")]) or "Unknown"
         year = rel.get("year")
         country = rel.get("country")
+        cover = pick_cover(rel)
 
-        cover = None
-        imgs = rel.get("images") or []
-        if imgs:
-            cover = imgs[0].get("uri")
-        if not cover:
-            cover = rel.get("thumb")
+        tracks = discogs_tracks(rel)
+        track_lines = make_track_lines(artists, title, tracks) if tracks else ["트랙 정보 없음"]
 
-        tracks = discogs_all_tracks(rel)
+        embeds = build_result_embeds(title, artists, year, country, cover, track_lines)
 
-        lines = []
-        for i, t in enumerate(tracks, 1):
-            yt = youtube_link(artists, t)
-            if yt:
-                lines.append(f"`{i:02}` {t} • [YouTube]({yt})")
-            else:
-                lines.append(f"`{i:02}` {t}")
-
-        if not lines:
-            lines = ["트랙 정보 없음"]
-
-        track_chunks = chunk_lines(lines, limit=1000)
-        embeds = build_embeds(album_title, artists, year, country, cover, track_chunks)
-
-        # 결과를 선택창 메시지로 교체 + 선택창 제거 (중복 출력 방지 핵심)
+        # 1) 드롭다운 메시지 자체를 "결과"로 교체 + 드롭다운 제거
         await interaction.message.edit(content=None, embed=embeds[0], view=None)
 
-        # 트랙이 너무 길어서 embed 여러 개면 나머지만 추가로 전송
+        # 2) 트랙이 너무 길면 나머지 embed만 추가 전송
         if len(embeds) > 1:
             for e in embeds[1:]:
                 await interaction.channel.send(embed=e)
 
-        # !lp 원본 메시지 삭제 (Manage Messages 필요)
+        # 3) !lp 쓴 사람 메시지 삭제 (봇에 Manage Messages 권한 필요)
         try:
             await self.origin_message.delete()
         except Exception:
@@ -256,10 +256,15 @@ class ReleaseSelect(discord.ui.Select):
 
         await interaction.followup.send("완료", ephemeral=True)
 
-class ReleaseSelectView(discord.ui.View):
-    def __init__(self, results, author_id: int, origin_message: discord.Message):
+class LPView(discord.ui.View):
+    def __init__(self, results: list[dict], author_id: int, origin_message: discord.Message):
         super().__init__(timeout=60)
-        self.add_item(ReleaseSelect(results, author_id, origin_message))
+        self.add_item(LPSelect(results, author_id, origin_message))
+
+    async def on_timeout(self):
+        # 시간 지나면 선택창만 깔끔히 제거
+        for item in self.children:
+            item.disabled = True
 
 @bot.event
 async def on_ready():
@@ -267,11 +272,9 @@ async def on_ready():
 
 @bot.command()
 async def lp(ctx, *, query: str):
-    if already_processed(ctx.message.id):
-        return
-
+    # 결과 여러개면 드롭다운 1개만 띄움
     try:
-        results = discogs_search(query, limit=10)
+        results = discogs_search_vinyl(query, limit=10)
     except Exception as e:
         await ctx.send(f"검색 실패: {e}")
         return
@@ -280,7 +283,7 @@ async def lp(ctx, *, query: str):
         await ctx.send("없음")
         return
 
-    view = ReleaseSelectView(results, author_id=ctx.author.id, origin_message=ctx.message)
+    view = LPView(results, author_id=ctx.author.id, origin_message=ctx.message)
     await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
