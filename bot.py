@@ -121,20 +121,20 @@ def format_tracks_010203(tracks):
 def build_embed(album_title: str, artists: str, year, country, cover_url: str | None, top3: list[str]):
     embed = discord.Embed(
         title=album_title,
-        description=f"🎧 {artists}",
+        description=f" {artists}",
         color=0x2b2d31
     )
 
     info = []
     if year:
-        info.append(f"📅 {year}")
+        info.append(f" {year}")
     if country:
-        info.append(f"🌍 {country}")
+        info.append(f" {country}")
     if info:
-        embed.add_field(name="📀 앨범 정보", value=" / ".join(info), inline=False)
+        embed.add_field(name="앨범 정보", value=" / ".join(info), inline=False)
 
     embed.add_field(
-        name="💿 대표 인기 수록곡 TOP3",
+        name=" 수록곡 ",
         value=format_tracks_010203(top3),
         inline=False
     )
@@ -160,7 +160,7 @@ class ReleaseSelect(discord.ui.Select):
             options.append(discord.SelectOption(label=label[:100], value=str(rid)))
 
         super().__init__(
-            placeholder="원하는 LP 선택",
+            placeholder="선택",
             min_values=1,
             max_values=1,
             options=options
@@ -235,10 +235,11 @@ async def lp(ctx, *, query: str):
         return
 
     if not results:
-        await ctx.send("검색 결과 없음")
+        await ctx.send("없음")
         return
 
     view = ReleaseSelectView(results, author_id=ctx.author.id)
-    await ctx.send("골라.", view=view)
+    await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
+
