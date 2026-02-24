@@ -112,7 +112,7 @@ def spotify_album_top3_tracks(album_id: str):
     tracks.sort(key=lambda t: t.get("popularity", 0), reverse=True)
     return [t["name"] for t in tracks[:3]]
 
-# ===== Formatting =====
+# ===== Formatting / Embed =====
 def format_tracks_010203(tracks):
     if not tracks:
         return "트랙 정보 없음"
@@ -121,7 +121,7 @@ def format_tracks_010203(tracks):
 def build_embed(album_title: str, artists: str, year, country, cover_url: str | None, top3: list[str]):
     embed = discord.Embed(
         title=album_title,
-        description=f" {artists}",
+        description=f"🎧 {artists}",
         color=0x2b2d31
     )
 
@@ -131,10 +131,10 @@ def build_embed(album_title: str, artists: str, year, country, cover_url: str | 
     if country:
         info.append(f" {country}")
     if info:
-        embed.add_field(name="앨범 정보", value=" / ".join(info), inline=False)
+        embed.add_field(name=" 앨범 정보", value=" / ".join(info), inline=False)
 
     embed.add_field(
-        name=" 수록곡 ",
+        name="  수록곡",
         value=format_tracks_010203(top3),
         inline=False
     )
@@ -148,8 +148,9 @@ def build_embed(album_title: str, artists: str, year, country, cover_url: str | 
 
 # ===== UI =====
 class ReleaseSelect(discord.ui.Select):
-    def __init__(self, results, author_id: int):
+    def __init__(self, results, author_id: int, origin_message: discord.Message):
         self.author_id = author_id
+        self.origin_message = origin_message
 
         options = []
         for item in results:
@@ -160,7 +161,7 @@ class ReleaseSelect(discord.ui.Select):
             options.append(discord.SelectOption(label=label[:100], value=str(rid)))
 
         super().__init__(
-            placeholder="선택",
+            placeholder="원하는 LP 선택",
             min_values=1,
             max_values=1,
             options=options
@@ -207,20 +208,26 @@ class ReleaseSelect(discord.ui.Select):
 
         embed = build_embed(album_title, artists, year, country, cover, top3)
 
-        # 1) 선택창(드롭다운) 메시지 삭제
-        # 2) 결과는 새 메시지로 출력 (답장 아님)
+        # 선택창(드롭다운) 메시지 삭제 + 원본 !lp 메시지 삭제
         try:
             await interaction.message.delete()
         except Exception:
             pass
 
+        try:
+            await self.origin_message.delete()
+        except Exception:
+            pass
+
+        # 결과는 새 메시지로 출력 (답장 아님)
+        # interaction은 반드시 응답해야 해서 ephemeral로 짧게 처리 후, 채널에 결과 전송
         await interaction.response.send_message("처리됨", ephemeral=True)
         await interaction.channel.send(embed=embed)
 
 class ReleaseSelectView(discord.ui.View):
-    def __init__(self, results, author_id: int):
+    def __init__(self, results, author_id: int, origin_message: discord.Message):
         super().__init__(timeout=60)
-        self.add_item(ReleaseSelect(results, author_id))
+        self.add_item(ReleaseSelect(results, author_id, origin_message))
 
 @bot.event
 async def on_ready():
@@ -235,11 +242,10 @@ async def lp(ctx, *, query: str):
         return
 
     if not results:
-        await ctx.send("없음")
+        await ctx.send("검색 결과 없음")
         return
 
-    view = ReleaseSelectView(results, author_id=ctx.author.id)
-    await ctx.send("고르시오", view=view)
+    view = ReleaseSelectView(results, author_id=ctx.author.id, origin_message=ctx.message)
+    await ctx.send("골라.", view=view)
 
 bot.run(DISCORD_TOKEN)
-
