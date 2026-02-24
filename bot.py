@@ -17,7 +17,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Anti-duplicate guard (배포 꼬여도 1번만 반응) =====
+# ===== Anti-duplicate guard (여러 인스턴스면 의미 없음, 한 인스턴스에서만 방지) =====
 processed_ids = set()
 def already_processed(message_id: int) -> bool:
     if message_id in processed_ids:
@@ -29,7 +29,7 @@ def already_processed(message_id: int) -> bool:
 
 # ===== Discogs =====
 DISCOGS_BASE = "https://api.discogs.com"
-DISCOGS_HEADERS = {"User-Agent": "lp-bot/final-onefile"}
+DISCOGS_HEADERS = {"User-Agent": "lp-bot/final-youtube-fix"}
 
 def discogs_search(query: str, limit: int = 10):
     url = f"{DISCOGS_BASE}/database/search"
@@ -40,14 +40,14 @@ def discogs_search(query: str, limit: int = 10):
         "per_page": limit,
         "token": DISCOGS_TOKEN,
     }
-    r = requests.get(url, params=params, headers=DISCOGS_HEADERS, timeout=15)
+    r = requests.get(url, params=params, headers=DISCOGS_HEADERS, timeout=20)
     r.raise_for_status()
     return r.json().get("results", [])
 
 def discogs_release(release_id: int):
     url = f"{DISCOGS_BASE}/releases/{release_id}"
     params = {"token": DISCOGS_TOKEN}
-    r = requests.get(url, params=params, headers=DISCOGS_HEADERS, timeout=15)
+    r = requests.get(url, params=params, headers=DISCOGS_HEADERS, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -67,34 +67,61 @@ yt_cache: dict[str, str | None] = {}
 def youtube_enabled() -> bool:
     return bool(YOUTUBE_API_KEY)
 
-def youtube_link(q: str) -> str | None:
-    if q in yt_cache:
-        return yt_cache[q]
-    if not youtube_enabled():
-        yt_cache[q] = None
-        return None
-
+def _youtube_search_once(query: str) -> str | None:
+    """Return first video link or None."""
     params = {
         "part": "snippet",
-        "q": q,
+        "q": query,
         "key": YOUTUBE_API_KEY,
         "maxResults": 1,
         "type": "video",
+        "videoCategoryId": "10",   # 음악 카테고리로 제한 (성공률 크게 올라감)
+        "safeSearch": "none",
     }
-    try:
-        r = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=15)
-        r.raise_for_status()
-        items = (r.json().get("items") or [])
-        if not items:
-            yt_cache[q] = None
-            return None
-        vid = items[0]["id"]["videoId"]
-        link = f"https://youtu.be/{vid}"
-        yt_cache[q] = link
-        return link
-    except Exception:
-        yt_cache[q] = None
+    r = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=20)
+    r.raise_for_status()
+    items = (r.json().get("items") or [])
+    if not items:
         return None
+    vid = items[0]["id"]["videoId"]
+    return f"https://youtu.be/{vid}"
+
+def youtube_link(artist: str, track: str) -> str | None:
+    """
+    실패율 줄이기 최종 버전:
+    - 일반 제목(Everything, Diamond 같은) 때문에 생기는 매칭 실패를 줄이려고
+      query를 2~3번 바꿔가며 재시도.
+    """
+    if not youtube_enabled():
+        return None
+
+    # 캐시 키는 artist+track (재시도까지 포함된 결과 저장)
+    cache_key = f"{artist}|||{track}"
+    if cache_key in yt_cache:
+        return yt_cache[cache_key]
+
+    # 검색어 우선순위:
+    # 1) Official Audio
+    # 2) Topic (자동 생성 음원)
+    # 3) 그냥 audio
+    # + 아티스트를 따옴표로 묶어서 정확도 약간 올림
+    queries = [
+        f'{track} "{artist}" Official Audio',
+        f'{track} "{artist}" topic',
+        f'{track} "{artist}" audio',
+    ]
+
+    for q in queries:
+        try:
+            link = _youtube_search_once(q)
+            if link:
+                yt_cache[cache_key] = link
+                return link
+        except Exception:
+            continue
+
+    yt_cache[cache_key] = None
+    return None
 
 # ===== Formatting =====
 def chunk_lines(lines: list[str], limit: int = 1000) -> list[str]:
@@ -168,23 +195,14 @@ class ReleaseSelect(discord.ui.Select):
             label = f"{title} ({year})" if year else title
             options.append(discord.SelectOption(label=label[:100], value=str(rid)))
 
-        super().__init__(
-            placeholder="원하는 LP 선택",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+        super().__init__(placeholder="원하는 LP 선택", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        # 배포 꼬여서 여러 인스턴스 떠도 "선택"은 한번만 처리
-        if already_processed(interaction.message.id):
-            await interaction.response.send_message("이미 처리됨", ephemeral=True)
-            return
-
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("니가 검색한 거 아님", ephemeral=True)
             return
 
+        # 타임아웃 방지 (유튜브 여러번 검색해서 느릴 수 있음)
         await interaction.response.defer(ephemeral=True)
 
         rid = int(self.values[0])
@@ -210,8 +228,7 @@ class ReleaseSelect(discord.ui.Select):
 
         lines = []
         for i, t in enumerate(tracks, 1):
-            q = f"{artists} {t} audio"
-            yt = youtube_link(q)
+            yt = youtube_link(artists, t)
             if yt:
                 lines.append(f"`{i:02}` {t} • [YouTube]({yt})")
             else:
@@ -223,7 +240,7 @@ class ReleaseSelect(discord.ui.Select):
         track_chunks = chunk_lines(lines, limit=1000)
         embeds = build_embeds(album_title, artists, year, country, cover, track_chunks)
 
-        # 결과를 새로 보내지 말고, 선택창 메시지를 "결과"로 교체 + 선택창 제거
+        # 결과를 선택창 메시지로 교체 + 선택창 제거 (중복 출력 방지 핵심)
         await interaction.message.edit(content=None, embed=embeds[0], view=None)
 
         # 트랙이 너무 길어서 embed 여러 개면 나머지만 추가로 전송
@@ -231,7 +248,7 @@ class ReleaseSelect(discord.ui.Select):
             for e in embeds[1:]:
                 await interaction.channel.send(embed=e)
 
-        # !lp 쓴 사람 메시지도 삭제 (Manage Messages 필요)
+        # !lp 원본 메시지 삭제 (Manage Messages 필요)
         try:
             await self.origin_message.delete()
         except Exception:
@@ -250,7 +267,6 @@ async def on_ready():
 
 @bot.command()
 async def lp(ctx, *, query: str):
-    # 배포 꼬여서 여러 인스턴스 떠도 "검색"은 한번만 처리
     if already_processed(ctx.message.id):
         return
 
@@ -261,11 +277,10 @@ async def lp(ctx, *, query: str):
         return
 
     if not results:
-        await ctx.send("검색 결과 없음")
+        await ctx.send("없음")
         return
 
     view = ReleaseSelectView(results, author_id=ctx.author.id, origin_message=ctx.message)
     await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
-
