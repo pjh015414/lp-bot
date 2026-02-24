@@ -120,7 +120,7 @@ def build_embeds(album_title: str, artists: str, year, country, cover_url: str |
 
     base = discord.Embed(
         title=album_title,
-        description=f"🎧 {artists}",
+        description=f" {artists}",
         color=0x2b2d31
     )
 
@@ -268,3 +268,4 @@ async def lp(ctx, *, query: str):
     await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
+
