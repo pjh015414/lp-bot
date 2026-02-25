@@ -29,18 +29,32 @@ def youtube_search(query):
         "q": query,
         "key": YOUTUBE_API_KEY,
         "maxResults": 1,
-        "type": "video"
+        "type": "video",
+        "videoCategoryId": "10",
+        "safeSearch": "none",
     }
+
     try:
         r = requests.get(url, params=params, timeout=15)
+
+        # 여기서 상태코드 확인 + 에러 출력
+        if r.status_code != 200:
+            try:
+                print("YT ERROR", r.status_code, r.text[:300])
+            except:
+                print("YT ERROR", r.status_code)
+            return None
+
         data = r.json()
         items = data.get("items", [])
         if items:
             vid = items[0]["id"]["videoId"]
             return f"https://youtu.be/{vid}"
-    except:
         return None
-    return None
+
+    except Exception as e:
+        print("YT EXCEPTION", str(e))
+        return None
 
 def get_youtube_link(artist, track, album):
     if not youtube_enabled():
@@ -169,4 +183,5 @@ async def lp(ctx, *, query: str = None):
     await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
+
 
