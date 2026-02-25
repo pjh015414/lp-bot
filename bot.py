@@ -50,12 +50,15 @@ def get_youtube_link(artist, track, album):
     if cache_key in yt_cache:
         return yt_cache[cache_key]
 
+    # 한국 인디/짧은 곡명 대응용 초강화 검색
     queries = [
-        f"{artist} {track} official audio",
+        f"{artist} {album} {track} official audio",
+        f"{artist} {album} {track} audio",
         f"{artist} {track} audio",
-        f"{track} {artist}",
-        f"{artist} {track} {album}",
-        f"{track} audio"
+        f"{artist} {track} topic",
+        f"{artist} {track} lyrics",
+        f"{album} {track}",
+        f"{track} {artist}"
     ]
 
     for q in queries:
@@ -166,3 +169,4 @@ async def lp(ctx, *, query: str = None):
     await ctx.send("고르시오", view=view)
 
 bot.run(DISCORD_TOKEN)
+
